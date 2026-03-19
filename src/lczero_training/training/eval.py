@@ -395,6 +395,14 @@ class Evaluation:
 
     def __init__(self, loss_fn: LczeroLoss):
         self.loss_fn = loss_fn
+        # Accumulated accuracy statistics across all batches.
+        self._total_samples = 0
+        self._top1_correct = 0
+        self._top5_correct = 0
+        # Accumulated loss statistics.
+        self._num_batches = 0
+        self._total_loss = 0.0
+        self._loss_components: Dict[str, float] = {}
 
     def run(
         self,
@@ -411,7 +419,7 @@ class Evaluation:
         )
 
         for i in range(num_samples):
-            logger.info("Processing sample %d/%d", i, num_samples)
+            logger.info("Processing batch %d/%d", i + 1, num_samples)
             self._process_sample(
                 model,
                 datagen,
@@ -422,7 +430,6 @@ class Evaluation:
                 model_output_vfn,
                 softmax_jax_wdl,
             )
-            logger.info("Sample %d complete", i)
 
     def _process_sample(
         self,
@@ -498,6 +505,96 @@ class Evaluation:
         }
         dumper.dump_tensors(losses, "LOSSES")
         dumper.dump_structured(batch, outputs, losses)
+
+        # Accumulate loss statistics.
+        self._num_batches += 1
+        batch_loss = float(jnp.mean(per_sample_loss))
+        self._total_loss += batch_loss
+        # unweighted_losses is a dict of jax arrays from vmap.
+        uw = jax.device_get(unweighted_losses)
+        for k, v in uw.items():
+            mean_v = float(np.mean(np.asarray(v)))
+            self._loss_components[k] = self._loss_components.get(k, 0.0) + mean_v
+            logger.info("  %s: %.4f", k, mean_v)
+
+        # Compute move prediction accuracy (top-1 and top-5).
+        if "vanilla" in policy_preds:
+            self._compute_accuracy(
+                policy_preds["vanilla"], batch["probabilities"]
+            )
+
+    def _compute_accuracy(
+        self, policy_logits: jax.Array, target_probs: jax.Array
+    ) -> None:
+        """Compute top-1 and top-5 move prediction accuracy for a batch.
+
+        Args:
+            policy_logits: Model policy output [batch, 1858].
+            target_probs: Target probabilities [batch, 1858] with -1 for illegal.
+        """
+        logits_np = np.asarray(policy_logits)
+        targets_np = np.asarray(target_probs)
+
+        # Mask illegal moves (marked as -1) to -inf in logits.
+        illegal_mask = targets_np < 0
+        logits_masked = np.where(illegal_mask, -np.inf, logits_np)
+
+        # Target move is the one with highest probability (one-hot target).
+        target_moves = np.argmax(np.maximum(targets_np, 0), axis=-1)  # [batch]
+
+        # Top-5 predicted moves per position.
+        top5_preds = np.argsort(logits_masked, axis=-1)[:, -5:]  # [batch, 5]
+
+        batch_size = logits_np.shape[0]
+        top1_preds = top5_preds[:, -1]  # highest logit
+
+        top1_hits = int(np.sum(top1_preds == target_moves))
+        top5_hits = int(np.sum(
+            np.any(top5_preds == target_moves[:, None], axis=-1)
+        ))
+
+        self._total_samples += batch_size
+        self._top1_correct += top1_hits
+        self._top5_correct += top5_hits
+
+        top1_pct = 100.0 * top1_hits / batch_size
+        top5_pct = 100.0 * top5_hits / batch_size
+        logger.info(
+            "  Batch accuracy: top-1 %.2f%% (%d/%d), top-5 %.2f%% (%d/%d)",
+            top1_pct, top1_hits, batch_size,
+            top5_pct, top5_hits, batch_size,
+        )
+
+    def _log_summary(self) -> None:
+        """Log accumulated evaluation statistics."""
+        logger.info("=" * 60)
+        logger.info("EVALUATION SUMMARY (%d positions, %d batches)",
+                     self._total_samples, self._num_batches)
+        logger.info("=" * 60)
+
+        if self._num_batches > 0:
+            avg_loss = self._total_loss / self._num_batches
+            logger.info("Average total loss: %.4f", avg_loss)
+            for k in sorted(self._loss_components.keys()):
+                avg_comp = self._loss_components[k] / self._num_batches
+                logger.info("  %s: %.4f", k, avg_comp)
+
+        if self._total_samples > 0:
+            top1_pct = 100.0 * self._top1_correct / self._total_samples
+            top5_pct = 100.0 * self._top5_correct / self._total_samples
+            logger.info(
+                "Move accuracy (top-1): %.2f%% (%d/%d)",
+                top1_pct, self._top1_correct, self._total_samples,
+            )
+            logger.info(
+                "Move accuracy (top-5): %.2f%% (%d/%d)",
+                top5_pct, self._top5_correct, self._total_samples,
+            )
+
+        if self._num_batches == 0 and self._total_samples == 0:
+            logger.info("No samples processed.")
+
+        logger.info("=" * 60)
 
     def _loss_for_grad(
         self, model_arg: LczeroModel, sample_arg: TrainingSample
@@ -599,6 +696,7 @@ def eval(
             softmax_jax_wdl=softmax_jax_wdl,
         )
     finally:
+        evaluation._log_summary()
         dumper.close()
         if onnx_comparator:
             onnx_comparator.log_summary()
