@@ -23,11 +23,12 @@ class LeelaPytreeWeightsVisitor:
                     state["value_heads"][head_name],
                     getattr(weights.value_heads, head_name),
                 )
-        for head_name in ["main"]:
-            assert head_name in state["movesleft_heads"], (
-                f"movesleft head {head_name} missing in state"
-            )
-            self.movesleft_head(state["movesleft_heads"][head_name], weights)
+        if "movesleft_heads" in state:
+            for head_name in ["main"]:
+                if head_name in state["movesleft_heads"]:
+                    self.movesleft_head(
+                        state["movesleft_heads"][head_name], weights
+                    )
 
     def embedding_block(
         self, nnx_dict: nnx.State, weights: net_pb2.Weights
