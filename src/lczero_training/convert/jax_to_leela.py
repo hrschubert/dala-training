@@ -80,7 +80,10 @@ def jax_to_leela(
         lc0_weights.min_version.minor,
         lc0_weights.min_version.patch,
     ) = _split_version(export_options.min_version)
-    lc0_weights.format.CopyFrom(_make_format())
+    has_movesleft = "movesleft_heads" in jax_weights and any(
+        True for _ in jax_weights["movesleft_heads"].flat_state()
+    )
+    lc0_weights.format.CopyFrom(_make_format(has_movesleft=has_movesleft))
     if export_options.training_steps is not None:
         lc0_weights.training_params.training_steps = (
             export_options.training_steps
@@ -99,7 +102,7 @@ def _split_version(version_str: str) -> tuple[int, int, int]:
     return cast(tuple[int, int, int], tuple(map(int, parts)))
 
 
-def _make_format() -> net_pb2.Format:
+def _make_format(has_movesleft: bool = True) -> net_pb2.Format:
     fmt = net_pb2.Format()
     fmt.weights_encoding = fmt.LINEAR16
     netfmt = fmt.network_format
@@ -108,7 +111,10 @@ def _make_format() -> net_pb2.Format:
     netfmt.network = netfmt.NETWORK_ATTENTIONBODY_WITH_MULTIHEADFORMAT
     netfmt.policy = netfmt.POLICY_ATTENTION
     netfmt.value = netfmt.VALUE_WDL
-    netfmt.moves_left = netfmt.MOVES_LEFT_V1
+    if has_movesleft:
+        netfmt.moves_left = netfmt.MOVES_LEFT_V1
+    else:
+        netfmt.moves_left = netfmt.MOVES_LEFT_NONE
     netfmt.default_activation = netfmt.DEFAULT_ACTIVATION_MISH
     netfmt.smolgen_activation = netfmt.ACTIVATION_SWISH
     netfmt.ffn_activation = netfmt.ACTIVATION_DEFAULT
