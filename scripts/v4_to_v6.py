@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-"""Convert V4TrainingData .gz files to V6TrainingData format."""
+"""Convert V4TrainingData .gz files to V6TrainingData format.
+
+Supports parallel conversion via --workers (defaults to CPU count).
+"""
 
 import argparse
 import gzip
-import math
 import os
 import struct
 import sys
+import time
+from multiprocessing import Pool, cpu_count
 from pathlib import Path
 
 V4_SIZE = 8292
@@ -17,9 +21,13 @@ V6_FMT = "<I I 1858f 104Q 4B B B B B 4f 3f 2f 3f 3f I 2H 2f"
 
 NAN = float("nan")
 
+# Pre-compile struct objects for speed.
+_v4_struct = struct.Struct(V4_FMT)
+_v6_struct = struct.Struct(V6_FMT)
+
 
 def convert_v4_to_v6(v4_bytes):
-    fields = struct.unpack(V4_FMT, v4_bytes)
+    fields = _v4_struct.unpack(v4_bytes)
     idx = 0
     version = fields[idx]; idx += 1
     probs = fields[idx:idx+1858]; idx += 1858
@@ -46,8 +54,6 @@ def convert_v4_to_v6(v4_bytes):
         result_q, result_d = 0.0, 1.0
 
     # Use the game result as the value target everywhere.
-    # This ensures consistency regardless of which value_type
-    # the loss function is configured to use.
     # If the V4 data has engine evals (lichess mode), prefer those
     # for root_q/best_q; otherwise use the game result.
     has_eval = (root_q != 0.0 or best_q != 0.0)
@@ -77,7 +83,7 @@ def convert_v4_to_v6(v4_bytes):
         played_idx, played_idx,                      # played_idx, best_idx
         0.0, 0.0,                                    # policy_kld, q_st
     )
-    return struct.pack(V6_FMT, *v6_values)
+    return _v6_struct.pack(*v6_values)
 
 
 def convert_gz_file(input_path, output_path):
@@ -94,10 +100,24 @@ def convert_gz_file(input_path, output_path):
     return num_frames
 
 
+def _worker(args):
+    """Worker function for multiprocessing Pool."""
+    input_path, output_path = args
+    try:
+        return convert_gz_file(input_path, output_path)
+    except Exception as e:
+        print(f"Error converting {input_path}: {e}", file=sys.stderr)
+        return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description="Convert V4 .gz to V6 format")
     parser.add_argument("input", help="Input dir with V4 .gz files")
     parser.add_argument("output", help="Output dir for V6 .gz files")
+    parser.add_argument(
+        "-j", "--workers", type=int, default=0,
+        help="Number of parallel workers (default: CPU count)",
+    )
     args = parser.parse_args()
 
     input_dir = Path(args.input)
@@ -107,17 +127,54 @@ def main():
         print(f"No .gz files found in {input_dir}")
         sys.exit(1)
 
-    print(f"Found {len(gz_files)} .gz files to convert")
-    total_frames = 0
-    for i, gz_file in enumerate(gz_files):
+    num_workers = args.workers if args.workers > 0 else cpu_count()
+
+    # Build list of (input, output) pairs, skipping already-converted files.
+    work_items = []
+    skipped = 0
+    for gz_file in gz_files:
         rel_path = gz_file.relative_to(input_dir)
         out_path = output_dir / rel_path
-        n = convert_gz_file(str(gz_file), str(out_path))
-        total_frames += n
-        if (i + 1) % 100 == 0 or (i + 1) == len(gz_files):
-            print(f"  [{i+1}/{len(gz_files)}] {total_frames} frames")
+        if out_path.exists():
+            skipped += 1
+        else:
+            work_items.append((str(gz_file), str(out_path)))
 
-    print(f"Done. {len(gz_files)} files, {total_frames} frames.")
+    total = len(gz_files)
+    to_convert = len(work_items)
+    print(f"Found {total} .gz files: {to_convert} to convert, {skipped} already done")
+
+    if to_convert == 0:
+        print("Nothing to do.")
+        return
+
+    if num_workers == 1:
+        # Sequential mode
+        total_frames = 0
+        for i, (inp, outp) in enumerate(work_items):
+            total_frames += _worker((inp, outp))
+            if (i + 1) % 100 == 0 or (i + 1) == to_convert:
+                print(f"  [{i+1}/{to_convert}] {total_frames} frames")
+    else:
+        # Parallel mode
+        print(f"Converting with {num_workers} workers...")
+        total_frames = 0
+        done = 0
+        t0 = time.perf_counter()
+        with Pool(num_workers) as pool:
+            for n in pool.imap_unordered(_worker, work_items, chunksize=8):
+                total_frames += n
+                done += 1
+                if done % 200 == 0 or done == to_convert:
+                    elapsed = time.perf_counter() - t0
+                    rate = done / elapsed
+                    eta = (to_convert - done) / rate if rate > 0 else 0
+                    print(
+                        f"  [{done}/{to_convert}] {total_frames} frames, "
+                        f"{rate:.1f} files/s, ETA {eta/60:.0f}m"
+                    )
+
+    print(f"Done. {to_convert} files converted, {total_frames} frames total.")
 
 
 if __name__ == "__main__":
