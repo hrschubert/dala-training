@@ -178,12 +178,14 @@ python -m grpc_tools.protoc \
     --pyi_out=src/ \
     proto/*.proto
 
-# Also compile lc0 protos needed by the converter
+# Also compile lc0 protos (net, hlo, onnx) needed by model_config and converter
 python -m grpc_tools.protoc \
     --proto_path=libs/lc0 \
     --python_out=src/ \
     --pyi_out=src/ \
-    libs/lc0/proto/net.proto
+    libs/lc0/proto/net.proto \
+    libs/lc0/proto/hlo.proto \
+    libs/lc0/proto/onnx.proto
 
 echo "  Done."
 
@@ -311,7 +313,7 @@ echo "  Done."
 echo ""
 echo "=== [9/10] Preparing configuration ==="
 cd "$REPO_DIR"
-
+mkdir -p configs
 CONFIG_DEST="configs/${RUN_NAME}.textproto"
 cp "$INPUT_CONFIG" "$CONFIG_DEST"
 
@@ -386,8 +388,17 @@ if [ -d "${CHECKPOINT_DIR}/0" ]; then
     echo "  Checkpoint already exists at $CHECKPOINT_DIR, skipping init."
     echo "  (Delete $CHECKPOINT_DIR to reinitialize.)"
 else
-    lc0-init --config "$CONFIG_DEST"
-    echo "  Checkpoint initialized."
+    echo "  Running: lc0-init --config $CONFIG_DEST"
+    echo "  (working dir: $(pwd))"
+    lc0-init --config "$CONFIG_DEST" 2>&1
+    if [ -d "${CHECKPOINT_DIR}/0" ]; then
+        echo "  Checkpoint initialized successfully."
+    else
+        echo "  ERROR: lc0-init completed but no checkpoint was created at ${CHECKPOINT_DIR}/0"
+        echo "  Check the config file paths:"
+        grep -E 'path:|directory:' "$CONFIG_DEST"
+        exit 1
+    fi
 fi
 echo "  Done."
 
