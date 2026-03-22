@@ -19,9 +19,9 @@ fi
 
 INPUT_PGN="$(realpath "$1")"
 OUTPUT_DIR="$(realpath -m "$2")"
-# Cap at 32 workers — more causes disk/memory thrashing
+# Cap at 128 workers — more causes disk/memory thrashing
 _NPROC=$(nproc)
-_MAX_WORKERS=$(( _NPROC < 32 ? _NPROC : 32 ))
+_MAX_WORKERS=$(( _NPROC < 128 ? _NPROC : 128 ))
 NUM_WORKERS="${3:-$_MAX_WORKERS}"
 TOOL="${TRAININGDATA_TOOL:-$(dirname "$0")/../../trainingdata-tool/trainingdata-tool}"
 
