@@ -150,6 +150,32 @@ convert_chunk() {
         skip="$start_offset" count="$chunk_size" \
         of="$chunk_pgn" 2>/dev/null
 
+    # The last game in the chunk is likely truncated (dd cuts at a byte
+    # boundary, not a game boundary).  Remove the incomplete trailing
+    # game by finding the last complete result marker and trimming there.
+    # A complete PGN game always ends with a result token on its own line
+    # (1-0, 0-1, 1/2-1/2, or *) followed by blank line(s).
+    python3 -c "
+import sys, os
+path = sys.argv[1]
+with open(path, 'rb') as f:
+    data = f.read()
+# Find the last occurrence of a result marker that ends a game.
+# Search backwards for the last complete game ending.
+for marker in [b'\n1-0\n', b'\n0-1\n', b'\n1/2-1/2\n', b'\n*\n',
+               b'\n1-0\r\n', b'\n0-1\r\n', b'\n1/2-1/2\r\n', b'\n*\r\n']:
+    idx = data.rfind(marker)
+    if idx >= 0:
+        # Keep up to and including the result marker
+        cut = idx + len(marker)
+        if cut < len(data):
+            trimmed = len(data) - cut
+            with open(path, 'wb') as f:
+                f.write(data[:cut])
+            print(f'  [Chunk {sys.argv[2]}] Trimmed {trimmed} trailing bytes (incomplete game)')
+        break
+" "$chunk_pgn" "$chunk_idx"
+
     echo "  [Chunk $chunk_idx/$NUM_WORKERS] Converting games..."
 
     # Run trainingdata-tool, forwarding periodic progress lines
