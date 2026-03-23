@@ -2,13 +2,15 @@
 # =============================================================================
 # Parallel PGN → V4 conversion using trainingdata-tool
 #
-# Splits a PGN file into N chunks at game boundaries, then runs
-# trainingdata-tool on each chunk in parallel.
+# Splits a PGN file into N chunks using python-chess for correct game boundary
+# detection, then runs trainingdata-tool on each chunk in parallel.
+#
+# Requires: python3 with chess module (pip install python-chess)
 #
 # Usage:
 #   ./parallel_pgn_convert.sh <input.pgn> <output_v4_dir> [num_workers]
 #
-# Default workers = number of CPU cores.
+# Default workers = number of CPU cores (capped at 128).
 # =============================================================================
 set -euo pipefail
 
@@ -19,7 +21,6 @@ fi
 
 INPUT_PGN="$(realpath "$1")"
 OUTPUT_DIR="$(realpath -m "$2")"
-# Cap at 128 workers — more causes disk/memory thrashing
 _NPROC=$(nproc)
 _MAX_WORKERS=$(( _NPROC < 128 ? _NPROC : 128 ))
 NUM_WORKERS="${3:-$_MAX_WORKERS}"
@@ -29,7 +30,6 @@ if [ ! -f "$INPUT_PGN" ]; then
     echo "Error: PGN file not found: $INPUT_PGN"; exit 1
 fi
 if [ ! -x "$TOOL" ]; then
-    # Try common locations
     for candidate in \
         "${HOME}/trainingdata-tool/trainingdata-tool" \
         "$(dirname "$0")/../../trainingdata-tool/trainingdata-tool"; do
@@ -59,149 +59,218 @@ echo "  Tool:    $TOOL"
 echo "============================================================"
 
 # ---------------------------------------------------------------------------
-# Step 1: Calculate split points at game boundaries
+# Step 1: Split PGN into chunks using python-chess for correct parsing
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== Step 1: Calculating split points ==="
+echo "=== Step 1: Splitting PGN into chunks using python-chess ==="
 
-# We need to split the file into NUM_WORKERS roughly equal parts,
-# but only at lines starting with [Event (game boundaries).
-# Strategy: calculate target byte offsets, then seek to each offset
-# and scan forward to the next [Event line.
-
-CHUNK_SIZE=$(( FILE_SIZE / NUM_WORKERS ))
-
-# Export variables for the Python subprocess
 export INPUT_PGN FILE_SIZE NUM_WORKERS TMPDIR
 
-# Find split byte offsets (at game boundaries)
 python3 << 'PYEOF'
-import sys, os
+import os, sys
+
+try:
+    import chess.pgn
+except ImportError:
+    print("ERROR: python-chess not installed. Run: pip install python-chess", file=sys.stderr)
+    sys.exit(1)
 
 pgn_path = os.environ["INPUT_PGN"]
 file_size = int(os.environ["FILE_SIZE"])
 num_workers = int(os.environ["NUM_WORKERS"])
 tmpdir = os.environ["TMPDIR"]
+
 chunk_size = file_size // num_workers
 
+def find_game_boundary_with_chess(pgn_path, approx_offset):
+    """Use python-chess to find a verified game boundary near approx_offset.
+
+    Seeks to approx_offset, scans forward for a line starting with '[Event ',
+    then uses chess.pgn.read_game() to verify it's a real game start.
+    Returns the byte offset of the verified game start, or None.
+    """
+    with open(pgn_path, "r", encoding="utf-8", errors="replace") as f:
+        # Seek to approximate position
+        f.seek(approx_offset)
+
+        # Read and discard the rest of the current line (we may be mid-line)
+        f.readline()
+
+        # Now scan forward for the pattern: blank line(s) followed by [Event
+        # We look for a line that starts with [Event after whitespace-only lines
+        max_scan = 10 * 1024 * 1024  # Scan up to 10MB forward
+        scanned = 0
+        prev_was_blank = False
+
+        while scanned < max_scan:
+            pos_before = f.tell()
+            line = f.readline()
+            if not line:
+                return None  # EOF
+            scanned += len(line.encode("utf-8", errors="replace"))
+
+            stripped = line.strip()
+            if stripped == "":
+                prev_was_blank = True
+                continue
+
+            if prev_was_blank and stripped.startswith("[Event "):
+                # Found a candidate. Verify with python-chess by trying to
+                # read a game from this position.
+                candidate_offset = pos_before
+                f.seek(candidate_offset)
+                try:
+                    game = chess.pgn.read_game(f)
+                    if game is not None:
+                        # Successfully parsed a game — this is a real boundary
+                        return candidate_offset
+                except Exception:
+                    pass
+                # If parsing failed, continue scanning from after this line
+                f.seek(pos_before + len(line.encode("utf-8", errors="replace")))
+
+            prev_was_blank = False
+
+        return None
+
+
+# Find split points
 split_offsets = [0]
 
-with open(pgn_path, "rb") as f:
-    for i in range(1, num_workers):
-        target = chunk_size * i
-        # Seek to target and scan forward for a game boundary
-        f.seek(target)
-        # Read ahead to find next [Event line
-        # Read in chunks to avoid loading too much into memory
-        buf = b""
-        while True:
-            block = f.read(1024 * 1024)  # 1MB at a time
-            if not block:
-                break
-            buf += block
-            # Look for \n[Event  (game boundary)
-            idx = buf.find(b"\n[Event ")
-            if idx >= 0:
-                split_offsets.append(target + idx + 1)  # +1 to skip the \n
-                break
-            # Keep only tail to avoid memory buildup
-            if len(buf) > 2 * 1024 * 1024:
-                target += len(buf) - 1024 * 1024
-                buf = buf[-1024 * 1024:]
+for i in range(1, num_workers):
+    target = chunk_size * i
+    boundary = find_game_boundary_with_chess(pgn_path, target)
+    if boundary is not None and boundary > split_offsets[-1]:
+        split_offsets.append(boundary)
+        print(f"  Split point {i}/{num_workers-1}: offset {boundary:,} "
+              f"({boundary/file_size*100:.1f}%)")
+    else:
+        print(f"  Split point {i}/{num_workers-1}: not found, merging with previous chunk")
 
 split_offsets.append(file_size)
 
-# Write split info
-with open(f"{tmpdir}/splits.txt", "w") as out:
-    for i in range(len(split_offsets) - 1):
-        out.write(f"{split_offsets[i]} {split_offsets[i+1]}\n")
+num_chunks = len(split_offsets) - 1
+print(f"  Split into {num_chunks} chunks")
 
-print(f"  Split into {len(split_offsets)-1} chunks")
-for i in range(len(split_offsets) - 1):
-    size = split_offsets[i+1] - split_offsets[i]
-    print(f"    Chunk {i}: offset {split_offsets[i]:,}, size {size/1e9:.2f} GB")
+with open(f"{tmpdir}/splits.txt", "w") as out:
+    for i in range(num_chunks):
+        start = split_offsets[i]
+        end = split_offsets[i + 1]
+        size = end - start
+        print(f"    Chunk {i}: offset {start:,}, size {size/1e9:.2f} GB")
+        out.write(f"{start} {end}\n")
+
+# Write chunk files in parallel using multiprocessing
+import time
+from multiprocessing import Pool, Value, Lock
+import multiprocessing
+
+print(f"\n  Writing chunk files with python-chess in parallel ({num_workers} workers)...")
+
+def write_chunk(args):
+    """Write a single chunk PGN file using python-chess. Runs in a worker process."""
+    chunk_idx, start, end, pgn_path, tmpdir = args
+    import chess.pgn, time, os
+    chunk_path = f"{tmpdir}/chunk_{chunk_idx}.pgn"
+    games_written = 0
+    chunk_start = time.time()
+
+    with open(pgn_path, "r", encoding="utf-8", errors="replace") as f:
+        f.seek(start)
+        with open(chunk_path, "w", encoding="utf-8") as out:
+            while f.tell() < end:
+                try:
+                    game = chess.pgn.read_game(f)
+                except Exception:
+                    continue
+                if game is None:
+                    break
+                print(game, file=out, end="\n\n")
+                games_written += 1
+
+    chunk_mb = os.path.getsize(chunk_path) / 1e6
+    elapsed = time.time() - chunk_start
+    return chunk_idx, games_written, chunk_mb, elapsed
+
+# Build task list
+tasks = []
+for i in range(num_chunks):
+    tasks.append((i, split_offsets[i], split_offsets[i + 1], pgn_path, tmpdir))
+
+write_start = time.time()
+total_games = 0
+chunks_done = 0
+
+# Use min(num_workers, num_chunks) processes — no point spawning more than chunks
+pool_size = min(num_workers, num_chunks)
+with Pool(pool_size) as pool:
+    for chunk_idx, games_written, chunk_mb, elapsed in pool.imap_unordered(write_chunk, tasks):
+        total_games += games_written
+        chunks_done += 1
+        print(f"    Chunk {chunk_idx+1}/{num_chunks}: {games_written:,} games, "
+              f"{chunk_mb:.1f} MB, {elapsed:.1f}s  "
+              f"[{chunks_done}/{num_chunks} chunks done]")
+
+overall_elapsed = time.time() - write_start
+rate = total_games / overall_elapsed if overall_elapsed > 0 else 0
+print(f"  Total: {total_games:,} games in {overall_elapsed:.0f}s "
+      f"({rate:.0f} games/s)")
+
+# Rewrite splits.txt to signal that chunks are pre-extracted (no dd needed)
+with open(f"{tmpdir}/splits.txt", "w") as out:
+    for i in range(num_chunks):
+        out.write(f"{i}\n")
+
+print("  All chunks written successfully.")
 PYEOF
 
 NUM_CHUNKS=$(wc -l < "$TMPDIR/splits.txt")
-echo "  Created $NUM_CHUNKS split points"
+echo "  Created $NUM_CHUNKS chunks"
 
 # ---------------------------------------------------------------------------
-# Step 2: Extract chunks and run trainingdata-tool in parallel
+# Step 2: Run trainingdata-tool on each chunk in parallel
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Step 2: Converting chunks in parallel ==="
 
 convert_chunk() {
     local chunk_idx="$1"
-    local start_offset="$2"
-    local end_offset="$3"
-    local chunk_size=$((end_offset - start_offset))
-    local chunk_dir="${TMPDIR}/chunk_${chunk_idx}"
-    local chunk_pgn="${chunk_dir}/games.pgn"
+    local chunk_pgn="${TMPDIR}/chunk_${chunk_idx}.pgn"
     local out_dir="${OUTPUT_DIR}/chunk_${chunk_idx}"
-    local chunk_size_h=$(numfmt --to=iec "$chunk_size" 2>/dev/null || echo "${chunk_size}")
 
-    mkdir -p "$chunk_dir" "$out_dir"
+    if [ ! -f "$chunk_pgn" ]; then
+        echo "  [Chunk $chunk_idx/$NUM_CHUNKS] WARNING: chunk file missing, skipping"
+        return
+    fi
 
-    echo "  [Chunk $chunk_idx/$NUM_WORKERS] Extracting ${chunk_size_h}..."
+    local chunk_size_h
+    chunk_size_h=$(numfmt --to=iec "$(stat -c%s "$chunk_pgn")" 2>/dev/null || echo "?")
 
-    # Extract chunk using dd
-    dd if="$INPUT_PGN" bs=1M iflag=skip_bytes,count_bytes \
-        skip="$start_offset" count="$chunk_size" \
-        of="$chunk_pgn" 2>/dev/null
+    mkdir -p "$out_dir"
+    echo "  [Chunk $chunk_idx/$NUM_CHUNKS] Converting ${chunk_size_h}..."
 
-    # The last game in the chunk is likely truncated (dd cuts at a byte
-    # boundary, not a game boundary).  Remove the incomplete trailing
-    # game by finding the last complete result marker and trimming there.
-    # A complete PGN game always ends with a result token on its own line
-    # (1-0, 0-1, 1/2-1/2, or *) followed by blank line(s).
-    python3 -c "
-import sys, os
-path = sys.argv[1]
-with open(path, 'rb') as f:
-    data = f.read()
-# Find the last occurrence of a result marker that ends a game.
-# Search backwards for the last complete game ending.
-for marker in [b'\n1-0\n', b'\n0-1\n', b'\n1/2-1/2\n', b'\n*\n',
-               b'\n1-0\r\n', b'\n0-1\r\n', b'\n1/2-1/2\r\n', b'\n*\r\n']:
-    idx = data.rfind(marker)
-    if idx >= 0:
-        # Keep up to and including the result marker
-        cut = idx + len(marker)
-        if cut < len(data):
-            trimmed = len(data) - cut
-            with open(path, 'wb') as f:
-                f.write(data[:cut])
-            print(f'  [Chunk {sys.argv[2]}] Trimmed {trimmed} trailing bytes (incomplete game)')
-        break
-" "$chunk_pgn" "$chunk_idx"
-
-    echo "  [Chunk $chunk_idx/$NUM_WORKERS] Converting games..."
-
-    # Run trainingdata-tool, forwarding periodic progress lines
     cd "$out_dir"
     "$TOOL" "$chunk_pgn" 2>&1 | while IFS= read -r line; do
-        echo "  [Chunk $chunk_idx/$NUM_WORKERS] $line"
+        echo "  [Chunk $chunk_idx/$NUM_CHUNKS] $line"
     done
 
-    # Clean up the extracted chunk PGN to save disk space
+    # Clean up chunk PGN to save disk space
     rm -f "$chunk_pgn"
 
     local n_files
     n_files=$(find "$out_dir" -name '*.gz' | wc -l)
-    echo "  [Chunk $chunk_idx/$NUM_WORKERS] DONE — $n_files V4 files"
+    echo "  [Chunk $chunk_idx/$NUM_CHUNKS] DONE — $n_files V4 files"
 }
 
 export -f convert_chunk
-export INPUT_PGN TOOL TMPDIR OUTPUT_DIR NUM_WORKERS
+export INPUT_PGN TOOL TMPDIR OUTPUT_DIR NUM_CHUNKS
 
 START_TIME=$(date +%s)
 
-# Run chunks in parallel using background jobs
 chunk_idx=0
 pids=()
-while IFS=' ' read -r start end; do
-    convert_chunk "$chunk_idx" "$start" "$end" &
+while IFS= read -r idx; do
+    convert_chunk "$idx" &
     pids+=($!)
     chunk_idx=$((chunk_idx + 1))
     # Limit concurrent jobs
@@ -226,8 +295,6 @@ ELAPSED=$((END_TIME - START_TIME))
 echo ""
 echo "=== Step 3: Consolidating output ==="
 
-# Flatten all supervised-* dirs from chunks into a single output
-# Rename files to avoid collisions
 COUNTER=0
 for chunk_dir in "$OUTPUT_DIR"/chunk_*/supervised-*; do
     if [ ! -d "$chunk_dir" ]; then continue; fi
