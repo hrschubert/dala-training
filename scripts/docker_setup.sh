@@ -149,7 +149,7 @@ cd "$REPO_DIR"
 # Install the package with all dependencies in editable mode
 pip install -e ".[dev]" -q 2>&1 | tail -5
 # Ensure grpc_tools is available for protobuf compilation
-pip install grpcio-tools -q 2>&1 | tail -2
+pip install grpcio-tools python-chess -q 2>&1 | tail -2
 
 # Verify JAX can see the GPU
 echo "  Checking JAX GPU access..."
@@ -382,7 +382,7 @@ echo ""
 echo "=== [10/10] Initializing training (lc0-init) ==="
 cd "$REPO_DIR"
 
-mkdir -p "$CHECKPOINT_DIR" "$EXPORT_DIR" "$TENSORBOARD_DIR"
+mkdir -p "$EXPORT_DIR" "$TENSORBOARD_DIR"
 
 if [ -d "${CHECKPOINT_DIR}/0" ]; then
     echo "  Checkpoint already exists at $CHECKPOINT_DIR, skipping init."
