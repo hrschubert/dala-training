@@ -5,6 +5,7 @@ import logging
 import os
 import sys
 
+import jax
 import orbax.checkpoint as ocp
 from flax import nnx
 from google.protobuf import text_format
@@ -164,13 +165,15 @@ def train(
             training_state = checkpoint_mgr.restore(
                 None, args=ocp.args.PyTreeRestore(empty_no_swa)
             )
-            # Reconstruct swa_state from model weights
+            # Reconstruct swa_state as a deep copy of model weights
+            # (must be a separate copy to avoid donate-twice errors in JAX)
             assert isinstance(training_state, TrainingState)
             if training_state.jit_state.swa_state is None:
-                logging.info("Initializing swa_state from model_state")
+                logging.info("Initializing swa_state from model_state (deep copy)")
+                swa_copy = jax.tree.map(lambda x: x.copy(), training_state.jit_state.model_state)
                 training_state = training_state.replace(
                     jit_state=training_state.jit_state.replace(
-                        swa_state=training_state.jit_state.model_state
+                        swa_state=swa_copy
                     )
                 )
         else:
