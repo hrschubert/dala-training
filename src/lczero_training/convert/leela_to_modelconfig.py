@@ -47,12 +47,8 @@ def leela_to_modelconfig(
             net_pb2.NetworkFormat.ValueFormat.Name(leela_net_format.value)
         )
     )
-    assert leela_net_format.moves_left == net_pb2.NetworkFormat.MOVES_LEFT_V1, (
-        "Only V1 moves left format is supported, got {}".format(
-            net_pb2.NetworkFormat.MovesLeftFormat.Name(
-                leela_net_format.moves_left
-            )
-        )
+    has_moves_left = (
+        leela_net_format.moves_left == net_pb2.NetworkFormat.MOVES_LEFT_V1
     )
 
     def size(x: net_pb2.Weights.Layer) -> int:
@@ -120,8 +116,9 @@ def leela_to_modelconfig(
             if head.HasField("ip_val_cat_b"):
                 value_head.num_categorical_buckets = size(head.ip_val_cat_b)
 
-    movesleft_head = model_config.movesleft_head.add()
-    movesleft_head.name = "main"
-    movesleft_head.num_channels = size(weights.ip_mov_b)
+    if has_moves_left and size(weights.ip_mov_b) > 0:
+        movesleft_head = model_config.movesleft_head.add()
+        movesleft_head.name = "main"
+        movesleft_head.num_channels = size(weights.ip_mov_b)
 
     return model_config
