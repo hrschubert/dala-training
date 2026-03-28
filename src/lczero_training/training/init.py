@@ -98,10 +98,25 @@ def init(
             checkpoint_path,
             options=ocp.CheckpointManagerOptions(create=False),
         )
-        training_state = source_mgr.restore(
-            source_mgr.latest_step(),
-            args=ocp.args.PyTreeRestore(training_state),
-        )
+        try:
+            training_state = source_mgr.restore(
+                source_mgr.latest_step(),
+                args=ocp.args.PyTreeRestore(training_state),
+            )
+        except ValueError as e:
+            if "tree structures do not match" in str(e):
+                logger.warning(
+                    "Checkpoint tree mismatch — retrying with "
+                    "partial_restore=True: %s", e
+                )
+                training_state = source_mgr.restore(
+                    source_mgr.latest_step(),
+                    args=ocp.args.PyTreeRestore(
+                        training_state, partial_restore=True
+                    ),
+                )
+            else:
+                raise
 
     swa_enabled = config.training.HasField("swa")
 
