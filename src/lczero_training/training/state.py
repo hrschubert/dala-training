@@ -136,11 +136,13 @@ class TrainingState:
             max_grad_norm=getattr(training_config, "max_grad_norm", 0.0),
             lr_schedule=lr_sched,
         ).init(model_state)
+        import jax
+        swa_copy = jax.tree.map(lambda x: x.copy(), model_state)
         jit_state = JitTrainingState(
             step=0,
             model_state=model_state,
             opt_state=opt_state,
-            swa_state=model_state,
+            swa_state=swa_copy,
             num_averages=0.0,
         )
         return TrainingState(
