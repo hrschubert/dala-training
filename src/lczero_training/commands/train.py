@@ -150,18 +150,29 @@ def train(
         training_state = checkpoint_mgr.restore(
             None, args=ocp.args.PyTreeRestore(empty_state)
         )
-    except ValueError as e:
-        if "tree structures do not match" in str(e):
+    except (ValueError, TypeError) as e:
+        err_msg = str(e)
+        if "tree structures do not match" in err_msg or "swa_state" in err_msg:
             logging.warning(
-                "Checkpoint tree structure mismatch — retrying with "
-                "partial_restore=True: %s", e
+                "Checkpoint tree mismatch (likely swa_state) — "
+                "restoring without swa_state and reconstructing: %s", e
+            )
+            # Strip swa_state from the template so orbax ignores it
+            empty_no_swa = empty_state.replace(
+                jit_state=empty_state.jit_state.replace(swa_state=None)
             )
             training_state = checkpoint_mgr.restore(
-                None,
-                args=ocp.args.PyTreeRestore(
-                    empty_state, partial_restore=True
-                ),
+                None, args=ocp.args.PyTreeRestore(empty_no_swa)
             )
+            # Reconstruct swa_state from model weights
+            assert isinstance(training_state, TrainingState)
+            if training_state.jit_state.swa_state is None:
+                logging.info("Initializing swa_state from model_state")
+                training_state = training_state.replace(
+                    jit_state=training_state.jit_state.replace(
+                        swa_state=training_state.jit_state.model_state
+                    )
+                )
         else:
             raise
     logging.info("Restored checkpoint")
