@@ -139,12 +139,15 @@ def init(
             config.model.defaults.compute_dtype,
             ignore_config_mismatch,
         )
-        step = override_training_steps or lc0_steps
-        new_swa_state = (
-            training_state.jit_state.swa_state
-            if no_copy_swa
-            else (model_state if swa_enabled else None)
-        )
+        step = override_training_steps if override_training_steps is not None else lc0_steps
+        # Always save swa_state as a copy of model_state to keep the
+        # checkpoint tree consistent with what new_from_config produces.
+        # This avoids tree-mismatch errors when train.py restores.
+        import jax
+        if no_copy_swa:
+            new_swa_state = training_state.jit_state.swa_state
+        else:
+            new_swa_state = jax.tree.map(lambda x: x.copy(), model_state)
         training_state = training_state.replace(
             jit_state=training_state.jit_state.replace(
                 model_state=model_state,
