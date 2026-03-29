@@ -180,6 +180,20 @@ def train(
             raise
     logging.info("Restored checkpoint")
 
+    # Diagnostic: verify restored weights are not random
+    assert isinstance(training_state, TrainingState)
+    ms = training_state.jit_state.model_state
+    import numpy as _np
+    for key_path, leaf in jax.tree_util.tree_leaves_with_path(ms):
+        path_str = "/".join(str(k) for k in key_path)
+        arr = _np.asarray(leaf)
+        if arr.size > 0:
+            logging.info(
+                f"  weight check: {path_str}  shape={arr.shape}  "
+                f"mean={arr.mean():.6f}  std={arr.std():.6f}  "
+                f"min={arr.min():.6f}  max={arr.max():.6f}"
+            )
+
     model, _ = nnx.split(
         LczeroModel(config=config.model, rngs=nnx.Rngs(params=42))
     )
