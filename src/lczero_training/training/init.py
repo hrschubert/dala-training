@@ -56,6 +56,19 @@ def _load_lc0_model_state(
         weights_dtype=hlo_pb2.XlaShapeProto.F32, compute_dtype=compute_dtype
     )
     model_state = leela_to_jax(lc0_weights, import_options)
+
+    # Diagnostic: log weight statistics for value heads to verify import
+    import jax
+    import numpy as np
+    for key_path, leaf in jax.tree_util.tree_leaves_with_path(model_state):
+        path_str = "/".join(str(k) for k in key_path)
+        if "value" in path_str.lower():
+            arr = np.asarray(leaf)
+            logger.info(
+                f"  imported weight: {path_str}  shape={arr.shape}  "
+                f"mean={arr.mean():.6f}  std={arr.std():.6f}"
+            )
+
     return model_state, lc0_weights.training_params.training_steps
 
 
