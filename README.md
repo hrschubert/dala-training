@@ -1,93 +1,158 @@
-# Training
+# Dala — Human-Aligned Chess Networks
 
-The training pipeline resides in `tf`, this requires tensorflow running on linux (Ubuntu 16.04 in this case). (It can be made to work on windows too, but it takes more effort.)
+Dala is a series of chess neural networks aligned to specific Elo rating brackets, designed to play at a target skill level rather than at maximum strength. The networks are trained for the following rating brackets:
 
-## Installation
+- **Dala 700**
+- **Dala 900**
+- **Dala 1100**
+- **Dala 1300**
+- **Dala 1600**
 
-Install the requirements under `tf/requirements.txt`. And call `./init.sh` to compile the protobuf files.
+This repository is a fork of [LeelaChessZero / lczero-training](https://github.com/LeelaChessZero/lczero-training), modified so that **BT4+ transformer networks** can be trained directly from PGN files. The training data used in this project consists of [Lichess](https://lichess.org/) standard rated games from **January 2024 through February 2026**, filtered by Elo bracket.
 
-## Data preparation
+## Network Releases & Lichess Bots
 
-In order to start a training session you first need to download training data from https://storage.lczero.org/files/training_data/. Several chunks/games are packed into a tar file, and each tar file contains an hour worth of chunks. Preparing data requires the following steps:
+The trained networks are published under the [Releases](../../releases) page of this repository. They are also deployed as Lichess bots that anyone can challenge:
+
+| Targeted Rating | Lichess Bot |
+|---|---|
+| 700  | [@dala-700](https://lichess.org/@/dala-700)   |
+| 900  | [@dala-900](https://lichess.org/@/dala-900)   |
+| 1100 | [@dala-1100](https://lichess.org/@/dala-1100) |
+| 1300 | [@dala-1300](https://lichess.org/@/dala-1300) |
+| 1600 | [@dala-1600](https://lichess.org/@/dala-1600) |
+
+### Move Selection: Weighted Random vs. Best Move
+
+Unlike the [Maia](https://maiachess.com/) project, which deploys its networks using a `best_move` (argmax) policy, the Dala bots play **weighted random moves at depth 1**. The move at each turn is sampled from the policy distribution produced by the network rather than always selecting the most-probable move.
+
+This is a deliberate alignment choice:
+
+- **`best_move` selection inflates strength** — even a network trained on 1100-rated games will play noticeably stronger than 1100 if it always picks the most-probable move, because it filters out the human noise that defines play at that level.
+- **Weighted random sampling preserves the policy distribution**, including the human-typical mistakes, so the bot's actual playing strength tracks the targeted Elo bracket.
+
+The modified Lichess bot client used to deploy these networks is available at [hrschubert/lichess-bot](https://github.com/hrschubert/lichess-bot).
+
+## Changes vs. Upstream lczero-training
+
+This fork extends the upstream training pipeline with the following:
+
+### Training Pipeline
+- **Initialize training from an exported network** — `lc0-train --from-network model.pb.gz` skips the separate `lc0-init` step and starts training directly from a published Leela network.
+- **Periodic checkpointing & export** — `--checkpoint-every N` and `--export-every N` flags on `lc0-train` save intermediate checkpoints and `.pb.gz` exports during long runs (the upstream pipeline only saves at the end).
+- **Per-step LR + loss logging** — the training log includes the current learning rate and a breakdown of the unweighted loss components on every step, simplifying loss/LR-divergence debugging.
+- **Top-1 / top-5 move accuracy in `lc0-eval`** — the evaluation tool reports cross-entropy losses **and** policy accuracy on the entire dataset, with illegal-move masking applied.
+
+### PGN → Training Data Pipeline
+- `scripts/parallel_pgn_convert.sh` — parallelized conversion of large PGN files (50–200 GB Lichess monthly dumps) to V4 training data. Game-boundary splitting is done with `python-chess` to guarantee correctness, and chunk extraction runs across all available CPU cores.
+- `tools/v4_to_v6.py` — multiprocessing-based V4 → V6 converter (≈6× faster than serial). Supports resumable runs.
+- `tools/pgn_to_training_data.sh` — single-file pipeline driver: `.pgn.zst` → `zstd -d` → `trainingdata-tool` → V4 → V6.
+
+### Tooling & Reproducibility
+- `scripts/docker_setup.sh` — fully automated 10-step setup of the training environment in an Ubuntu + NVIDIA-driver Docker container (Miniconda, repo clone, C++ dataloader build, protobuf compilation, `trainingdata-tool` build, full PGN → V6 conversion, checkpoint init).
+- `scripts/plot_training.py` — Matplotlib plotter that parses the training log and produces a PDF with smoothed loss curves and the learning-rate schedule on a dual y-axis.
+
+### Supervised Training Restored
+The upstream README notes that **"Generating trainingdata from pgn files is currently broken and has low priority"** — this fork restores and extends that path so the entire pipeline (raw Lichess PGN → trained Leela network) is reproducible end-to-end.
+
+## Quick Start
+
+### 1. Build the C++ dataloader and protobufs (Linux/WSL2)
+
+```bash
+git submodule update --init --recursive
+uv venv
+uv sync
+CXX=clang++ CC=clang uv run meson setup build/release/ --buildtype=release --native-file=native.ini
+just build-proto
+meson compile -C build/release/
+ln -s -T ../../build/release/_lczero_training.cpython-311-x86_64-linux-gnu.so \
+   src/lczero_training/_lczero_training.so
+```
+
+(Or run `scripts/docker_setup.sh` inside an Ubuntu + NVIDIA Docker container to do all of the above plus PGN conversion automatically.)
+
+### 2. Convert PGN to V6 training data
+
+```bash
+# Parallel PGN → V4
+scripts/parallel_pgn_convert.sh filtered_1100.pgn /data/v4
+
+# V4 → V6
+python tools/v4_to_v6.py /data/v4 /data/v6 -j $(nproc)
+```
+
+### 3. Train
+
+```bash
+# Fresh training from a Leela network
+lc0-train --config configs/dala_1100.textproto \
+          --from-network base_network.pb.gz \
+          --override-steps 0 \
+          --checkpoint-every 5000 \
+          --export-every 10000
+
+# Resume from existing checkpoint
+lc0-train --config configs/dala_1100.textproto --checkpoint-every 5000
+```
+
+### 4. Evaluate
+
+```bash
+lc0-eval --config configs/dala_1100.textproto --network dala_1100.pb.gz
+```
+
+### 5. Plot Training Progress
+
+```bash
+python scripts/plot_training.py training.log training.pdf
+```
+
+---
+
+## Original README (excerpted)
+
+The training pipeline resides in `src/lczero_training` and uses **JAX / Flax / Optax** (the legacy `tf/` TensorFlow pipeline is unmaintained).
+
+### Installation
+
+Install with `uv sync` (Python 3.11+). The C++ dataloader extension is built via `meson`. Configuration is via protobuf TextProto files; see `docs/example.textproto` for a complete reference.
+
+### Data Preparation (upstream path)
+
+The upstream pipeline expects pre-packaged self-play training data:
 
 ```
 wget https://storage.lczero.org/files/training_data/training-run1--20200711-2017.tar
 tar -xzf training-run1--20200711-2017.tar
 ```
 
-## Training pipeline
+The dataloader accepts only `.gz` or `.tar` files containing V6/V7 `TrainingData` binary records.
 
-Now that the data is in the right format one can configure a training pipeline. This configuration is achieved through a yaml file, see `training/tf/configs/example.yaml`:
+### Training Configuration
 
-```yaml
-%YAML 1.2
----
-name: 'kb1-64x6'                       # ideally no spaces
-gpu: 0                                 # gpu id to process on
+Configuration is via a `.textproto` file. Key sections control the model architecture (transformer blocks, `d_model`, SmolGen), the optimizer (NAdamW), the learning-rate schedule, and the data loader. See `docs/example.textproto` for the full schema.
 
-dataset:
-  num_chunks: 100000                   # newest nof chunks to parse
-  train_ratio: 0.90                    # trainingset ratio
-  # For separated test and train data.
-  input_train: '/path/to/chunks/*/draw/' # supports glob
-  input_test: '/path/to/chunks/*/draw/'  # supports glob
-  # For a one-shot run with all data in one directory.
-  # input: '/path/to/chunks/*/draw/'
+### Building the 2025-08 release
 
-training:
-    batch_size: 2048                   # training batch
-    total_steps: 140000                # terminate after these steps
-    test_steps: 2000                   # eval test set values after this many steps
-    # checkpoint_steps: 10000          # optional frequency for checkpointing before finish
-    shuffle_size: 524288               # size of the shuffle buffer
-    lr_values:                         # list of learning rates
-        - 0.02
-        - 0.002
-        - 0.0005
-    lr_boundaries:                     # list of boundaries
-        - 100000
-        - 130000
-    policy_loss_weight: 1.0            # weight of policy loss
-    value_loss_weight: 1.0             # weight of value loss
-    path: '/path/to/store/networks'    # network storage dir
-
-model:
-  filters: 64
-  residual_blocks: 6
-...
-```
-
-The configuration is pretty self explanatory, if you're new to training I suggest looking at the [machine learning glossary](https://developers.google.com/machine-learning/glossary/) by google. Now you can invoke training with the following command:
-
-```bash
-./train.py --cfg configs/example.yaml --output /tmp/mymodel.txt
-```
-
-This will initialize the pipeline and start training a new neural network. You can view progress by invoking tensorboard:
-
-```bash
-tensorboard --logdir leelalogs
-```
-
-If you now point your browser at localhost:6006 you'll see the trainingprogress as the trainingsteps pass by. Have fun!
-
-## Restoring models
-
-The training pipeline will automatically restore from a previous model if it exists in your `training:path` as configured by your yaml config. For initializing from a raw `weights.txt` file you can use `training/tf/net_to_model.py`, this will create a checkpoint for you.
-
-## Supervised training
-
-Generating trainingdata from pgn files is currently broken and has low priority, feel free to create a PR.
-
-## Building 2025-08 version.
-
-1. Make sure `uv` and `justfile` are installed (plus `meson` and other stuff, potentially `protoc`).
-2. `git submodule update`
-3. `uv venv` (!important! do this before running meson; otherwise meson will build module for wrong python)
+1. Make sure `uv`, `just`, `meson` (and `protoc`) are installed.
+2. `git submodule update --init --recursive`
+3. `uv venv` *(do this **before** running meson, or it will build the module for the wrong Python)*
 4. `uv sync`
-5. `CXX=clang++ CC=clang uv run meson setup build/release/ --buildtype=release --native-file=native.ini` (clang is optional, should build fine with default compiler)
+5. `CXX=clang++ CC=clang uv run meson setup build/release/ --buildtype=release --native-file=native.ini`
 6. `just build-proto`
 7. `meson compile -C build/release/`
 8. `ln -s -T ../../build/release/_lczero_training.cpython-311-x86_64-linux-gnu.so src/lczero_training/_lczero_training.so`
+9. Run it: `uv run tui --config docs/example.textproto`
 
-14. Run it! `uv run tui --config docs/example.textproto`
+---
+
+## License
+
+This project inherits the GPL-3.0 license from upstream Leela Chess Zero. See `libs/lc0/LICENSE`.
+
+## Acknowledgements
+
+- The [LeelaChessZero](https://lczero.org/) project, on which this entire training pipeline is built.
+- The [Maia Chess](https://maiachess.com/) project, whose Elo-bracketed approach to human-aligned chess engines inspired Dala.
+- [Lichess](https://lichess.org/) for providing the [database of rated games](https://database.lichess.org/) that makes this work possible.
