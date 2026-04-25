@@ -1,14 +1,10 @@
 # Dala — Human-Aligned Chess Networks
 
 Dala is a series of chess neural networks aligned to specific Elo rating brackets, designed to play at a target skill level rather than at maximum strength. The networks are trained for the following rating brackets:
+**700, 900, 1100, 1300 1600**
 
-- **Dala 700**
-- **Dala 900**
-- **Dala 1100**
-- **Dala 1300**
-- **Dala 1600**
 
-This repository is a fork of [LeelaChessZero / lczero-training](https://github.com/LeelaChessZero/lczero-training), modified so that **BT4+ transformer networks** can be trained directly from PGN files. The training data used in this project consists of [Lichess](https://lichess.org/) standard rated games from **January 2024 through February 2026**, filtered by Elo bracket.
+This repository is a fork of [LeelaChessZero / lczero-training](https://github.com/LeelaChessZero/lczero-training), modified so that **BT4+ transformer networks** can be trained from converted PGN files. The training data used in this project consists of [Lichess](https://lichess.org/) standard rated games from **January 2024 through February 2026**, filtered by Elo bracket.
 
 ## Network Releases & Lichess Bots
 
@@ -32,6 +28,16 @@ This is a deliberate alignment choice:
 - **Weighted random sampling preserves the policy distribution**, including the human-typical mistakes, so the bot's actual playing strength tracks the targeted Elo bracket.
 
 The modified Lichess bot client used to deploy these networks is available at [hrschubert/lichess-bot](https://github.com/hrschubert/lichess-bot).
+
+## Statistics
+| Targeted Rating | Move accuracy (top-5) | Policy loss
+|---|---|---|
+| 1100 | 89.36% | 1.4635
+| 1300 | 90.04% | 1.4257
+| 1600 | 91.70% | 1.3387
+
+Table reports the top-5 move accuracy and policy loss across the highest targeted Elo brackets. The results indicate that, for these rating levels, the model’s selected move appears among the five highest-scoring candidate moves in approximately 90% of positions. Accuracy increases with targeted Elo, rising from 89.36% at 1100 Elo to 91.70% at 1600 Elo, while policy loss decreases correspondingly from 1.4635 to 1.3387. This pattern suggests that play in higher Elo brackets is more predictable under the model’s policy distribution, yielding higher top-5 agreement and lower loss values.
+
 
 ## Changes vs. Upstream lczero-training
 
