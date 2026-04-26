@@ -30,13 +30,13 @@ This is a deliberate alignment choice:
 The modified Lichess bot client used to deploy these networks is available at [hrschubert/lichess-bot](https://github.com/hrschubert/lichess-bot).
 
 ## Statistics
-| Targeted Rating | Move accuracy (top-5) | Policy loss
-|---|---|---|
-| 1100 | 89.36% | 1.4635
-| 1300 | 90.04% | 1.4257
-| 1600 | 91.70% | 1.3387
+| Targeted Rating | Accuracy (top-1) | Accuracy (top-5) | Policy loss
+|---|---|---|---|
+| 1100 | 53.01% | 89.36% | 1.4635
+| 1300 | 54.04% | 90.04% | 1.4257
+| 1600 | 55.61% | 91.70% | 1.3387
 
-Table reports the top-5 move accuracy and policy loss across the highest targeted Elo brackets. The results indicate that, for these rating levels, the model’s selected move appears among the five highest-scoring candidate moves in approximately 90% of positions. Accuracy increases with targeted Elo, rising from 89.36% at 1100 Elo to 91.70% at 1600 Elo, while policy loss decreases correspondingly from 1.4635 to 1.3387. This pattern suggests that play in higher Elo brackets is more predictable under the model’s policy distribution, yielding higher top-5 agreement and lower loss values.
+Table reports the top-1 and top-5 move accuracy and policy loss across the highest targeted Elo brackets. The results indicate that, for these rating levels, the model’s selected move appears among the five highest-scoring candidate moves in approximately 90% of positions. Accuracy increases with targeted Elo, rising from 89.36% at 1100 Elo to 91.70% at 1600 Elo, while policy loss decreases correspondingly from 1.4635 to 1.3387. This pattern suggests that play in higher Elo brackets is more predictable under the model’s policy distribution, yielding higher top-5 agreement and lower loss values.
 
 
 ## Changes vs. Upstream lczero-training
