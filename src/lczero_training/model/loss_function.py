@@ -220,6 +220,14 @@ class PolicyLoss(LossBase):
             temperature = 1.0
         self._temperature = temperature
 
+        # Distillation: when set, targets come from a teacher network's
+        # policy head (logits softmaxed) rather than from sample.probabilities.
+        self.distillation_teacher_head: Optional[str] = (
+            config.distillation_teacher_head
+            if config.distillation_teacher_head
+            else None
+        )
+
         # Store optimistic config if present.
         if config.HasField("optimistic"):
             opt = config.optimistic
@@ -281,18 +289,55 @@ class PolicyLoss(LossBase):
         sample: TrainingSample,
     ) -> jax.Array:
         policy_pred = predictions.policy[self.head_name]
-        # Extract probabilities from sample.
-        policy_targets = jnp.asarray(
-            sample.probabilities, dtype=policy_pred.dtype
-        )
+        # The legality mask is always derived from the training sample
+        # regardless of where targets come from: negative entries in
+        # sample.probabilities flag illegal moves.
+        legality_mask = sample.probabilities >= 0
+
+        if self.distillation_teacher_head is not None:
+            # Targets come from the teacher network. The teacher emits raw
+            # logits over all 1858 moves; we soften with temperature, mask
+            # illegal moves to -inf so softmax assigns them zero mass, and
+            # stop gradients (the teacher is frozen).
+            if self.distillation_teacher_head not in sample.teacher_policies:
+                raise KeyError(
+                    f"Policy loss for '{self.head_name}' requires teacher "
+                    f"head '{self.distillation_teacher_head}', but the "
+                    f"training batch carries no such teacher policy. Make "
+                    f"sure LossConfig.distillation_teacher_network is set "
+                    f"and the teacher network actually has this head."
+                )
+            teacher_logits = jnp.asarray(
+                sample.teacher_policies[self.distillation_teacher_head],
+                dtype=policy_pred.dtype,
+            )
+            # Apply temperature on logits (the standard form for teacher
+            # distillation), THEN softmax. This is not equivalent to
+            # exponentiating the probabilities post-hoc.
+            if self._temperature != 1.0:
+                teacher_logits = teacher_logits / self._temperature
+            teacher_logits = jnp.where(
+                legality_mask, teacher_logits, -jnp.inf
+            )
+            policy_targets = jax.lax.stop_gradient(
+                jax.nn.softmax(teacher_logits, axis=-1)
+            )
+        else:
+            # Standard path: targets are the policy probabilities recorded
+            # in the training sample.
+            policy_targets = jnp.asarray(
+                sample.probabilities, dtype=policy_pred.dtype
+            )
+            # Zero out negative targets for illegal moves.
+            policy_targets = jax.nn.relu(policy_targets)
+            # Apply temperature scaling on the probability distribution
+            # (post-hoc form used for human-move targets).
+            policy_targets = self._apply_temperature_and_normalize(
+                policy_targets
+            )
+
         if self.config.illegal_moves == PolicyLossConfig.MASK:
-            policy_pred = jnp.where(policy_targets >= 0, policy_pred, -jnp.inf)
-
-        # Zero out negative targets for illegal moves.
-        policy_targets = jax.nn.relu(policy_targets)
-
-        # Apply temperature scaling and renormalization if needed.
-        policy_targets = self._apply_temperature_and_normalize(policy_targets)
+            policy_pred = jnp.where(legality_mask, policy_pred, -jnp.inf)
 
         cross_entropy = cast(
             jax.Array,

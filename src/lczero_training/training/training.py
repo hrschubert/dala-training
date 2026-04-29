@@ -57,6 +57,9 @@ class Training:
     ]
     _swa_config: Optional[training_config_pb2.SWAConfig]
     _dp_sharding: Optional[jshard.NamedSharding]
+    _teacher_predictions_fn: Optional[
+        Callable[[jax.Array], Dict[str, jax.Array]]
+    ]
 
     def __init__(
         self,
@@ -64,10 +67,14 @@ class Training:
         graphdef: nnx.GraphDef,
         loss_fn: LczeroLoss,
         swa_config: Optional[training_config_pb2.SWAConfig] = None,
+        teacher_predictions_fn: Optional[
+            Callable[[jax.Array], Dict[str, jax.Array]]
+        ] = None,
     ):
         self.optimizer_tx = optimizer_tx
         self._swa_config = swa_config
         self._dp_sharding = None
+        self._teacher_predictions_fn = teacher_predictions_fn
 
         jit_kwargs: Dict[str, Any] = {
             "static_argnames": ("optimizer_tx",),
@@ -83,12 +90,10 @@ class Training:
             dp_sharding = jshard.NamedSharding(mesh, P("batch"))
             self._dp_sharding = dp_sharding
 
-            batch_sharding = TrainingBatch(
-                inputs=dp_sharding,
-                probabilities=dp_sharding,
-                values=dp_sharding,
-            )
-            in_shardings = (replicated, batch_sharding)
+            # Use a single batch-dim sharding for the entire TrainingBatch
+            # pytree (including teacher_policies leaves, whose key set is
+            # only known at runtime).
+            in_shardings = (replicated, dp_sharding)
             out_shardings = replicated
 
             jit_kwargs["in_shardings"] = in_shardings
@@ -313,6 +318,16 @@ class Training:
                     f"_before_{int(jit_state.step)}.prof"
                 )
             batch = self._validate_and_prepare_batch(next(datagen))
+            if self._teacher_predictions_fn is not None:
+                # Run the frozen teacher on the batch and stash its policy
+                # logits inside the batch pytree so distillation losses can
+                # consume them from sample.teacher_policies after vmap.
+                teacher_policies = self._teacher_predictions_fn(batch.inputs)
+                if self._dp_sharding is not None:
+                    teacher_policies = jax.device_put(
+                        teacher_policies, self._dp_sharding
+                    )
+                batch = batch.replace(teacher_policies=teacher_policies)
             jit_state, metrics = self.train_step(
                 self.optimizer_tx, jit_state, batch
             )

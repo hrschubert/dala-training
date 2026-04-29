@@ -99,6 +99,12 @@ message LossConfig {
   repeated ValueErrorLossConfig value_error = 4;
   repeated ValueCategoricalLossConfig value_categorical = 5;
   repeated RegularizationLossConfig regularization = 6;
+  // Optional path to an exported lc0 network (.pb.gz) used as a frozen
+  // teacher for policy distillation. When set, the train loop runs this
+  // network in inference mode on every batch and exposes its policy
+  // outputs to any PolicyLossConfig that has `distillation_teacher_head`
+  // set. Leaving this empty disables distillation.
+  string distillation_teacher_network = 7;
 }
 
 message RegularizationLossConfig {
@@ -156,6 +162,14 @@ message PolicyLossConfig {
   // Values <= 0 disable the adjustment and keep raw targets.
   float temperature = 6;
   OptimisticPolicyConfig optimistic = 7;
+  // When non-empty, the targets for this policy loss are taken from the
+  // teacher network configured at LossConfig.distillation_teacher_network
+  // rather than from the training sample's probabilities. The string is
+  // the name of the teacher's policy head whose output should be used
+  // (typically "vanilla"). The legality mask from the training sample
+  // (negative entries in `probabilities`) still applies. Temperature is
+  // applied to the teacher distribution after softmax.
+  string distillation_teacher_head = 8;
 }
 
 message ValueLossConfig {

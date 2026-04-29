@@ -15,6 +15,7 @@ from lczero_training.convert.jax_to_leela import (
     LeelaExportOptions,
     jax_to_leela,
 )
+from lczero_training.convert.teacher_loader import load_teacher_predictions_fn
 from lczero_training.dataloader import make_dataloader
 from lczero_training.model.loss_function import LczeroLoss
 from lczero_training.model.model import LczeroModel
@@ -207,6 +208,33 @@ def train(
         max_grad_norm=getattr(config.training, "max_grad_norm", 0.0),
         lr_schedule=lr_sched,
     )
+    # Optional policy-distillation teacher. We require any policy loss with
+    # `distillation_teacher_head` to also have a teacher network configured;
+    # conversely, if a teacher is configured but no loss references it we
+    # skip loading to avoid wasting GPU memory.
+    teacher_predictions_fn = None
+    teacher_path = config.training.losses.distillation_teacher_network
+    needs_teacher = any(
+        bool(pol.distillation_teacher_head)
+        for pol in config.training.losses.policy
+    )
+    if needs_teacher and not teacher_path:
+        logging.error(
+            "A policy loss has distillation_teacher_head set but "
+            "training.losses.distillation_teacher_network is empty."
+        )
+        sys.exit(1)
+    if teacher_path and needs_teacher:
+        teacher_predictions_fn = load_teacher_predictions_fn(
+            teacher_path,
+            compute_dtype=config.model.defaults.compute_dtype,
+        )
+    elif teacher_path and not needs_teacher:
+        logging.info(
+            "distillation_teacher_network is set but no policy loss has "
+            "distillation_teacher_head — teacher will not be loaded."
+        )
+
     training = Training(
         optimizer_tx=optimizer_tx,
         graphdef=model,
@@ -214,6 +242,7 @@ def train(
         swa_config=(
             config.training.swa if config.training.HasField("swa") else None
         ),
+        teacher_predictions_fn=teacher_predictions_fn,
     )
 
     def step_hook(hook_data):

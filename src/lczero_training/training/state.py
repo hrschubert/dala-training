@@ -1,6 +1,6 @@
 import dataclasses
 import logging
-from typing import Any, Optional, Union
+from typing import Any, Dict, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -39,11 +39,18 @@ class TrainingSample:
             - Index 3: orig [orig_q, orig_d, orig_m] (may contain NaN)
             - Index 4: root [root_q, root_d, root_m]
             - Index 5: st [q_st, d_st, NaN]
+        teacher_policies: Optional dict mapping teacher policy-head name to
+            logits tensor [1858]. Empty when no teacher network is
+            configured. Populated per-batch by the training loop before
+            being vmapped down to per-sample tensors.
     """
 
     inputs: jax.Array
     probabilities: jax.Array
     values: jax.Array
+    teacher_policies: Dict[str, jax.Array] = dataclasses.field(
+        default_factory=dict
+    )
 
 
 @jax.tree_util.register_dataclass
@@ -61,11 +68,21 @@ class TrainingBatch:
             - Index 3: orig [orig_q, orig_d, orig_m] (may contain NaN)
             - Index 4: root [root_q, root_d, root_m]
             - Index 5: st [q_st, d_st, NaN]
+        teacher_policies: Optional dict mapping teacher policy-head name to
+            policy logits tensor [batch, 1858]. Empty when no teacher
+            network is configured.
     """
 
     inputs: Union[jax.Array, jshard.NamedSharding]
     probabilities: Union[jax.Array, jshard.NamedSharding]
     values: Union[jax.Array, jshard.NamedSharding]
+    teacher_policies: Dict[str, Union[jax.Array, jshard.NamedSharding]] = (
+        dataclasses.field(default_factory=dict)
+    )
+
+    def replace(self, **changes: Any) -> "TrainingBatch":
+        """Returns a new instance of the class with the specified changes."""
+        return dataclasses.replace(self, **changes)
 
     @classmethod
     def from_tuple(
@@ -80,6 +97,7 @@ class TrainingBatch:
             inputs=jnp.asarray(tensor_tuple[0]),
             probabilities=jnp.asarray(tensor_tuple[1]),
             values=jnp.asarray(tensor_tuple[2]),
+            teacher_policies={},
         )
 
 
