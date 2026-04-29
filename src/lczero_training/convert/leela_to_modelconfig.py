@@ -124,3 +124,58 @@ def leela_to_modelconfig(
         movesleft_head.num_channels = size(weights.ip_mov_b)
 
     return model_config
+
+
+def is_compatible_subset(
+    source: model_config_pb2.ModelConfig,
+    target: model_config_pb2.ModelConfig,
+) -> tuple[bool, str]:
+    """Return (is_compatible, reason).
+
+    Configs are compatible if every layer/head in ``source`` also exists with
+    identical configuration in ``target``. ``target`` may declare additional
+    heads that are missing in ``source`` — those are allowed and will be left
+    at their random initialization when importing weights.
+
+    Use this to allow loading a network with fewer heads than the training
+    textproto declares (e.g. importing a 1-policy-head network into a
+    2-policy-head training config).
+    """
+    if source.defaults != target.defaults:
+        return False, "model.defaults differ"
+    if source.embedding != target.embedding:
+        return False, "model.embedding differs"
+    if source.encoder != target.encoder:
+        return False, "model.encoder differs"
+    if source.HasField(
+        "shared_policy_embedding_size"
+    ) != target.HasField("shared_policy_embedding_size"):
+        return False, "shared_policy_embedding_size presence differs"
+    if (
+        source.HasField("shared_policy_embedding_size")
+        and source.shared_policy_embedding_size
+        != target.shared_policy_embedding_size
+    ):
+        return False, "shared_policy_embedding_size value differs"
+
+    def _check_heads(field_name: str) -> tuple[bool, str]:
+        target_by_name = {h.name: h for h in getattr(target, field_name)}
+        for src_head in getattr(source, field_name):
+            if src_head.name not in target_by_name:
+                return (
+                    False,
+                    f"{field_name} '{src_head.name}' present in source "
+                    f"but not in target",
+                )
+            if src_head != target_by_name[src_head.name]:
+                return (
+                    False,
+                    f"{field_name} '{src_head.name}' configuration differs",
+                )
+        return True, ""
+
+    for field in ("policy_head", "value_head", "movesleft_head"):
+        ok, reason = _check_heads(field)
+        if not ok:
+            return False, reason
+    return True, "compatible"

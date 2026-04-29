@@ -18,7 +18,11 @@ class LeelaPytreeWeightsVisitor:
         self.encoder_tower(state["encoders"], weights)
         self.policy_heads(state, weights.policy_heads)
         for head_name in ["winner", "q", "st"]:
-            if head_name in state["value_heads"]:
+            # Only copy when the model has this head AND the source contains it.
+            if (
+                head_name in state["value_heads"]
+                and weights.value_heads.HasField(head_name)
+            ):
                 self.value_head(
                     state["value_heads"][head_name],
                     getattr(weights.value_heads, head_name),
@@ -115,7 +119,7 @@ class LeelaPytreeWeightsVisitor:
     def policy_heads(
         self, nnx_dict: nnx.State, weights: net_pb2.Weights.PolicyHeads
     ) -> None:
-        if "policy_embedding_shared" in nnx_dict:
+        if "policy_embedding_shared" in nnx_dict and weights.HasField("ip_pol_w"):
             self.matmul(
                 nnx_dict["policy_embedding_shared"],
                 weights.ip_pol_w,
@@ -123,7 +127,11 @@ class LeelaPytreeWeightsVisitor:
             )
         policy_heads_dict = nnx_dict["policy_heads"]
         for head_name in ["vanilla", "optimistic_st", "soft", "opponent"]:
-            if head_name in policy_heads_dict:
+            # Only copy weights when the model has this head AND the source
+            # network actually contains it. Missing heads in the source are
+            # left at their random initialization (added in the textproto
+            # config but not present in the imported network).
+            if head_name in policy_heads_dict and weights.HasField(head_name):
                 self.policy_head(
                     policy_heads_dict[head_name], getattr(weights, head_name)
                 )

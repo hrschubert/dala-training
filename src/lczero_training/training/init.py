@@ -13,7 +13,10 @@ from lczero_training.convert.leela_to_jax import (
     fix_older_weights_file,
     leela_to_jax,
 )
-from lczero_training.convert.leela_to_modelconfig import leela_to_modelconfig
+from lczero_training.convert.leela_to_modelconfig import (
+    is_compatible_subset,
+    leela_to_modelconfig,
+)
 from lczero_training.training.state import TrainingState
 from proto import hlo_pb2, net_pb2
 from proto.model_config_pb2 import ModelConfig
@@ -37,37 +40,37 @@ def _load_lc0_model_state(
     leela_config = leela_to_modelconfig(
         lc0_weights, hlo_pb2.XlaShapeProto.F32, compute_dtype
     )
-    if leela_config != expected_config:
+    compatible, reason = is_compatible_subset(leela_config, expected_config)
+    if not compatible:
         if ignore_config_mismatch:
             logger.warning(
-                "The provided lczero model configuration "
-                "differs from the one in the config file (ignored)."
+                "The provided lczero model configuration is not a "
+                f"compatible subset of the config file: {reason} (ignored)."
             )
         else:
             logger.error(
-                "The provided lczero model configuration "
-                "differs from the one in the config file."
+                "The provided lczero model configuration is not a "
+                f"compatible subset of the config file: {reason}."
             )
             logger.error(f"Config file model config: {expected_config}")
             logger.error(f"Leela model config: {leela_config}")
             sys.exit(1)
+    elif leela_config != expected_config:
+        logger.info(
+            "Source network is a strict subset of the target config — "
+            "any extra heads in the target will be left at their "
+            "random initialization."
+        )
 
     import_options = LeelaImportOptions(
         weights_dtype=hlo_pb2.XlaShapeProto.F32, compute_dtype=compute_dtype
     )
-    model_state = leela_to_jax(lc0_weights, import_options)
-
-    # Diagnostic: log weight statistics for value heads to verify import
-    import jax
-    import numpy as np
-    for key_path, leaf in jax.tree_util.tree_leaves_with_path(model_state):
-        path_str = "/".join(str(k) for k in key_path)
-        if "value" in path_str.lower():
-            arr = np.asarray(leaf)
-            logger.info(
-                f"  imported weight: {path_str}  shape={arr.shape}  "
-                f"mean={arr.mean():.6f}  std={arr.std():.6f}"
-            )
+    # Build the model from the textproto config (target_config) so that
+    # extra heads declared only in the textproto get random initialization
+    # while the visitor copies in whatever weights the source actually has.
+    model_state = leela_to_jax(
+        lc0_weights, import_options, target_config=expected_config
+    )
 
     return model_state, lc0_weights.training_params.training_steps
 

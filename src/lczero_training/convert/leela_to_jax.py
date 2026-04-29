@@ -8,7 +8,7 @@ import jax.numpy as jnp
 from flax import nnx, serialization
 
 from lczero_training.model.model import LczeroModel
-from proto import hlo_pb2, net_pb2
+from proto import hlo_pb2, model_config_pb2, net_pb2
 
 from .jax_to_leela import LeelaExportOptions, jax_to_leela
 from .leela_pytree_visitor import LeelaPytreeWeightsVisitor
@@ -111,9 +111,21 @@ class LeelaToJax(LeelaPytreeWeightsVisitor):
 
 
 def leela_to_jax(
-    leela_net: net_pb2.Net, import_options: LeelaImportOptions
+    leela_net: net_pb2.Net,
+    import_options: LeelaImportOptions,
+    target_config: Optional[model_config_pb2.ModelConfig] = None,
 ) -> nnx.State:
-    config = leela_to_modelconfig(
+    """Import lc0 weights into a JAX state.
+
+    If ``target_config`` is provided, the model is built from that config
+    rather than the one extracted from ``leela_net``. Any heads / layers
+    that exist in ``target_config`` but not in ``leela_net`` are left at
+    their random initialization (the visitor skips fields that the source
+    weights do not carry). This allows loading a network with fewer heads
+    than the training textproto declares (e.g. importing a 1-policy-head
+    network into a 2-policy-head training config).
+    """
+    config = target_config or leela_to_modelconfig(
         leela_net,
         import_options.weights_dtype,
         import_options.compute_dtype,
