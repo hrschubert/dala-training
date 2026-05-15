@@ -679,7 +679,26 @@ def eval(
 
     model = _load_model_from_checkpoint(config)
     dl_config = _get_dataloader_config(config, batch_size_override)
-    evaluation = Evaluation(loss_fn=LczeroLoss(config=config.training.losses))
+    # Drop distillation policy losses for evaluation: the teacher network
+    # is not running on the eval path, so sample.teacher_policies is empty
+    # and those losses would raise. Distillation loss is a training signal
+    # against the teacher — it isn't a meaningful evaluation metric on
+    # held-out data, where the ground truth is the recorded human move.
+    eval_losses = config.training.losses.__class__()
+    eval_losses.CopyFrom(config.training.losses)
+    kept_policy = [
+        pol for pol in eval_losses.policy if not pol.distillation_teacher_head
+    ]
+    dropped = len(eval_losses.policy) - len(kept_policy)
+    if dropped:
+        logger.info(
+            "Skipping %d distillation policy loss(es) during evaluation "
+            "(teacher network is not run on the eval path).",
+            dropped,
+        )
+    del eval_losses.policy[:]
+    eval_losses.policy.extend(kept_policy)
+    evaluation = Evaluation(loss_fn=LczeroLoss(config=eval_losses))
     dumper = Dumper(dump_to_stdout, dump_to_file, dump_to_shelve, dump_to_json)
     onnx_comparator = OnnxComparator(onnx_model) if onnx_model else None
 
