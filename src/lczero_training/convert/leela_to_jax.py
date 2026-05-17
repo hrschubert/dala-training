@@ -82,6 +82,12 @@ def fix_older_weights_file(file: net_pb2.Net) -> None:
 
 
 class LeelaToJax(LeelaPytreeWeightsVisitor):
+    def _source_has(self, container, field_name: str) -> bool:
+        # On the IMPORT path the .pb.gz is the source. Skip fields the
+        # source doesn't carry so missing heads stay at random init
+        # instead of being overwritten with zero-byte garbage.
+        return container.HasField(field_name)
+
     def embedding_block(
         self, nnx_dict: nnx.State, weights: net_pb2.Weights
     ) -> None:

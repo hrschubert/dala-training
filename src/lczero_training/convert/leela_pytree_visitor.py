@@ -11,6 +11,19 @@ class LeelaPytreeWeightsVisitor:
         self.leela_net = leela_net
         self.nnx_state = nnx_state
 
+    def _source_has(self, container, field_name: str) -> bool:
+        """Whether the source side carries this field.
+
+        Returns True by default — used on the EXPORT path, where the JAX
+        model is the source of truth and every head present in the model
+        must be written into the (initially-empty) proto.
+
+        Overridden by ``LeelaToJax`` to return ``container.HasField(...)`` so
+        the IMPORT path skips heads absent from the source ``.pb.gz`` and
+        leaves them at random init.
+        """
+        return True
+
     def run(self) -> None:
         state = self.nnx_state
         weights = self.leela_net.weights
@@ -18,10 +31,11 @@ class LeelaPytreeWeightsVisitor:
         self.encoder_tower(state["encoders"], weights)
         self.policy_heads(state, weights.policy_heads)
         for head_name in ["winner", "q", "st"]:
-            # Only copy when the model has this head AND the source contains it.
-            if (
-                head_name in state["value_heads"]
-                and weights.value_heads.HasField(head_name)
+            # Visit when the model has this head AND (for import) the source
+            # carries it. For export `_source_has` returns True so every
+            # model head is written.
+            if head_name in state["value_heads"] and self._source_has(
+                weights.value_heads, head_name
             ):
                 self.value_head(
                     state["value_heads"][head_name],
@@ -119,7 +133,9 @@ class LeelaPytreeWeightsVisitor:
     def policy_heads(
         self, nnx_dict: nnx.State, weights: net_pb2.Weights.PolicyHeads
     ) -> None:
-        if "policy_embedding_shared" in nnx_dict and weights.HasField("ip_pol_w"):
+        if "policy_embedding_shared" in nnx_dict and self._source_has(
+            weights, "ip_pol_w"
+        ):
             self.matmul(
                 nnx_dict["policy_embedding_shared"],
                 weights.ip_pol_w,
@@ -127,11 +143,12 @@ class LeelaPytreeWeightsVisitor:
             )
         policy_heads_dict = nnx_dict["policy_heads"]
         for head_name in ["vanilla", "optimistic_st", "soft", "opponent"]:
-            # Only copy weights when the model has this head AND the source
-            # network actually contains it. Missing heads in the source are
-            # left at their random initialization (added in the textproto
-            # config but not present in the imported network).
-            if head_name in policy_heads_dict and weights.HasField(head_name):
+            # Visit when the model has this head AND (for import) the source
+            # network carries it. For export `_source_has` returns True so
+            # every model head gets serialized into the .pb.gz.
+            if head_name in policy_heads_dict and self._source_has(
+                weights, head_name
+            ):
                 self.policy_head(
                     policy_heads_dict[head_name], getattr(weights, head_name)
                 )
